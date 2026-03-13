@@ -99,13 +99,13 @@ A NetworkPolicy extension.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: mshytse-allow-proxy-egress-simple
+  name: scalr-agent-allow-proxy-egress-simple
   namespace: <namespace>
 spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/component: task
-      app.kubernetes.io/instance: mshytse
+      app.kubernetes.io/instance: scalr-agent
   policyTypes:
   - Egress
   egress:
@@ -145,7 +145,7 @@ kubectl apply -f allow-squid-egress.yaml
 Deploy the agent using Helm, ensuring the proxy environment variables are set to point to the internal service.
 
 ```bash
-helm upgrade --install --namespace=<namespace> mshytse scalr-agent-helm/agent-job \
+helm upgrade --install --namespace=<namespace> scalr-agent scalr-agent-helm/agent-job \
     --set agent.token="<YOUR_TOKEN>" \
     --set global.proxy.enabled="true" \
     --set global.proxy.httpProxy="http://squid-proxy:3128" \
@@ -185,7 +185,31 @@ curl -I --connect-timeout 2 http://169.254.169.254/metadata/instance?api-version
 
 ---
 
-## 4. Troubleshooting
+## 4. Destroy / Cleanup
+
+To remove the proxy and related resources, delete the manifests in reverse order of installation:
+
+**Remove the NetworkPolicy:**
+
+```bash
+kubectl delete -f allow-squid-egress.yaml
+```
+
+**Remove the Squid proxy (Deployment, Service, ConfigMap):**
+
+```bash
+kubectl delete -f squid-full.yaml
+```
+
+To also remove the Scalr Agent release (optional):
+
+```bash
+helm uninstall scalr-agent --namespace=<namespace>
+```
+
+---
+
+## 5. Troubleshooting
 
 - **Infinite Hang:** If curl hangs at "Trying 10.x.x.x...", the NetworkPolicy is likely blocking egress from the task pod or ingress to the squid pod.
 - **Broken Pipe:** Usually related to Squid trying to write logs to a restricted `/dev/stdout`. Ensure `access_log none` is in the ConfigMap.
