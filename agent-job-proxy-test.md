@@ -115,6 +115,42 @@ spec:
     # No "to" section means "Allow to any destination"
 ```
 
+### Agent egress policy for proxy (agent-allow-proxy-egress)
+
+The proxy port (3128) must be allowed explicitly in the egress policy; otherwise agent pods may not reach the Squid proxy.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-allow-proxy-egress
+  namespace: <namespace>
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: agent
+      app.kubernetes.io/name: scalr-agent
+  policyTypes:
+  - Egress
+  egress:
+  # DNS to any namespace
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+    to:
+    - namespaceSelector: {}
+  # General egress to internet
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+  # Proxy (explicit for visibility)
+  - ports:
+    - protocol: TCP
+      port: 3128
+```
+
 ---
 
 ## 2. Installation Steps
