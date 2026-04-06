@@ -20,7 +20,7 @@ The **initial** setup below uses one IAM role and audience `scalr-cmek-aws-oidc-
 
 - One AWS account and one region for the key (multi-region key still has a **home** region in the ARN you store in Scalr).
 - Scalr hostname you actually use in the browser (must match `iss` / OIDC provider URL).
-- Edit the **`sub` arrays** in the trust JSON files if your Scalr account names differ from `account:test`, `account:demo`, `account:sandbox`.
+- In section 5, pick Option A (one account via `SCALR_ACCOUNT_NAME` or a literal `sub`) or Option B and edit the **`sub`** list if your Scalr account names differ from `account:test`, `account:demo`, `account:sandbox`. Use the same `sub` shape for the second role in section 8b if you expand.
 
 Scalr requires a **multi-region KMS key**; the ARN must look like `arn:aws:kms:...:key/mrk-...`.
 
@@ -179,7 +179,40 @@ export KMS_KEY_ARN="$(aws kms describe-key --region "$AWS_REGION" --key-id "$KMS
 
 ## 5. IAM role — primary (`scalr-cmek-oidc-test-role`)
 
-Trust policy `aud` is `scalr-cmek-aws-oidc-test` (must match Scalr `aws-audience` and the OIDC provider client id). Edit the `sub` list if needed.
+Trust policy `aud` is `scalr-cmek-aws-oidc-test` (must match Scalr `aws-audience` and the OIDC provider client id).
+
+Pick **one** of the trust snippets below. The JWT `sub` claim is always `account:<scalr-account-name>` (see the table at the top).
+
+**Option A — single Scalr account**
+
+Set the account **name** (same string Scalr uses in `sub`, without the `account:` prefix), or skip the export and edit the JSON to a literal such as `"account:prod"`.
+
+```bash
+export SCALR_ACCOUNT_NAME="your-scalr-account-name"
+```
+
+```bash
+cat > /tmp/trust-policy-oidc.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "${OIDC_PROVIDER_ARN}" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test",
+        "${SCALR_HOSTNAME}:sub": "account:${SCALR_ACCOUNT_NAME}"
+      }
+    }
+  }]
+}
+EOF
+```
+
+**Option B — multiple Scalr accounts**
+
+A JSON array under `StringEquals` for `sub` (logical OR across accounts).
 
 ```bash
 cat > /tmp/trust-policy-oidc.json << EOF
@@ -193,7 +226,7 @@ cat > /tmp/trust-policy-oidc.json << EOF
       "StringEquals": {
         "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test",
         "${SCALR_HOSTNAME}:sub": [
-          "account:test",
+          "account:${SCALR_ACCOUNT_NAME}",
           "account:demo",
           "account:sandbox"
         ]
@@ -202,7 +235,11 @@ cat > /tmp/trust-policy-oidc.json << EOF
   }]
 }
 EOF
+```
 
+Then create the role (same for both options):
+
+```bash
 aws iam create-role \
   --role-name scalr-cmek-oidc-test-role \
   --assume-role-policy-document file:///tmp/trust-policy-oidc.json
@@ -301,38 +338,7 @@ aws iam add-client-id-to-open-id-connect-provider \
 
 ### 8b. Create the second role and inline policy
 
-Pick **one** of the trust snippets below. The JWT `sub` claim is always `account:<scalr-account-name>` (see the table at the top).
-
-**Option A — single Scalr account**
-
-Set the account **name** (same string Scalr uses in `sub`, without the `account:` prefix), or skip the export and edit the JSON to a literal such as `"account:prod"`.
-
-```bash
-export SCALR_ACCOUNT_NAME="your-scalr-account-name"
-```
-
-```bash
-cat > /tmp/trust-policy-oidc-b.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Federated": "${OIDC_PROVIDER_ARN}" },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test-b",
-        "${SCALR_HOSTNAME}:sub": "account:${SCALR_ACCOUNT_NAME}"
-      }
-    }
-  }]
-}
-EOF
-```
-
-**Option B — multiple Scalr accounts**
-
-Same pattern as section 5: a JSON array under `StringEquals` for `sub` (logical OR across accounts).
+Use the **same** `sub` shape you chose in section 5 (single string or array). Example below matches Option B from section 5; if you used Option A there, set `"${SCALR_HOSTNAME}:sub"` to `"account:${SCALR_ACCOUNT_NAME}"` instead of the array.
 
 ```bash
 cat > /tmp/trust-policy-oidc-b.json << EOF
@@ -346,7 +352,7 @@ cat > /tmp/trust-policy-oidc-b.json << EOF
       "StringEquals": {
         "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test-b",
         "${SCALR_HOSTNAME}:sub": [
-          "account:test",
+          "account:${SCALR_ACCOUNT_NAME}",
           "account:demo",
           "account:sandbox"
         ]
@@ -355,11 +361,7 @@ cat > /tmp/trust-policy-oidc-b.json << EOF
   }]
 }
 EOF
-```
 
-Then create the role (same for both options):
-
-```bash
 aws iam create-role \
   --role-name scalr-cmek-oidc-test-role-b \
   --assume-role-policy-document file:///tmp/trust-policy-oidc-b.json
