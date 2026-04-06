@@ -1,169 +1,81 @@
-# AWS OIDC CMEK: minimal testing setup
+# AWS CMEK OIDC (test setup)
 
-## What Scalr puts in the JWT
+Uses the same shell vars as `cmek-aws-impersonation.md` where shared: `CMEK_AWS_ACCOUNT_ID`, `CMEK_KMS_REGION`. OIDC MRK and provider use `CMEK_OIDC_*` so impersonation `CMEK_KMS_KEY_*` / `CMEK_MRK_KEY_2_*` stay untouched.
 
-Scalr issues the token used as the web identity token. Claims relevant to IAM trust policies:
+JWT (trust policy): `iss` = `https://<host>` · `aud` = Scalr `aws-audience` · `sub` = `account:<scalr-account-name>` (name, not UUID).
 
-| Claim | Value |
-|--------|--------|
-| `iss` | Scalr endpoint URL: `https://<your-scalr-host>` (scheme + host from Scalr config) |
-| `aud` | Whatever you configure as `aws-audience` on the CMEK profile (must match the IAM OIDC provider client IDs and the role trust policy) |
-| `sub` | `account:<scalr-account-name>` (your Scalr account **name**, not UUID) |
-| `scalr_account_id` | Scalr account id |
-| `scalr_account_name` | Same as the account name in `sub` |
+| Variable | Meaning |
+|----------|---------|
+| `CMEK_AWS_ACCOUNT_ID` | Your AWS account (KMS + IAM) |
+| `CMEK_KMS_REGION` | MRK home region (all `kms` CLI here) |
+| `CMEK_SCALR_HOSTNAME` | Scalr UI host only, no `https://` |
+| `CMEK_OIDC_ISSUER_URL` | `https://${CMEK_SCALR_HOSTNAME}` |
+| `CMEK_OIDC_PROVIDER_ARN` | IAM OIDC provider ARN |
+| `CMEK_OIDC_THUMBPRINT` | TLS SHA-1 thumbprint for issuer |
+| `CMEK_OIDC_ROLE_NAME` | Primary IAM role (default `scalr-cmek-oidc-test-role`) |
+| `CMEK_OIDC_ROLE_NAME_SECONDARY` | Second role (default `scalr-cmek-oidc-test-role-b`) |
+| `CMEK_OIDC_AUDIENCE_A` | Primary audience / OIDC client id |
+| `CMEK_OIDC_AUDIENCE_B` | Second audience |
+| `CMEK_SCALR_ACCOUNT_NAME` | For trust `sub` (without `account:`) |
+| `CMEK_OIDC_KMS_KEY_ID` | OIDC MRK KeyId (`mrk-...`) |
+| `CMEK_OIDC_KMS_KEY_ARN` | OIDC MRK ARN |
+| `CMEK_OIDC_MRK_KEY_2_ID` | Optional second MRK for OIDC paths |
+| `CMEK_OIDC_MRK_KEY_2_ARN` | Optional second MRK ARN |
 
-The **initial** setup below uses one IAM role and audience `scalr-cmek-aws-oidc-test`. You can **expand** later to a second role and audience without recreating the KMS key.
+Scalr expects an MRK ARN (`.../key/mrk-...`). Put `put-key-policy` after the role exists (KMS validates principals).
+
+```bash
+export CMEK_AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+export CMEK_KMS_REGION="us-east-1"
+export CMEK_SCALR_HOSTNAME="your-env.scalr.io"
+export CMEK_OIDC_ISSUER_URL="https://${CMEK_SCALR_HOSTNAME}"
+export CMEK_OIDC_ROLE_NAME="scalr-cmek-oidc-test-role"
+export CMEK_OIDC_ROLE_NAME_SECONDARY="scalr-cmek-oidc-test-role-b"
+export CMEK_OIDC_AUDIENCE_A="scalr-cmek-aws-oidc-test"
+export CMEK_OIDC_AUDIENCE_B="scalr-cmek-aws-oidc-test-b"
+export CMEK_SCALR_ACCOUNT_NAME="your-scalr-account-name"
+export CMEK_OIDC_THUMBPRINT="<40-char-hex>"
+```
 
 ---
 
-## Prerequisites
-
-- One AWS account and one region for the key (multi-region key still has a **home** region in the ARN you store in Scalr).
-- Scalr hostname you actually use in the browser (must match `iss` / OIDC provider URL).
-- In section 5, pick Option A (one account via `SCALR_ACCOUNT_NAME` or a literal `sub`) or Option B and edit the **`sub`** list if your Scalr account names differ from `account:test`, `account:demo`, `account:sandbox`. Use the same `sub` shape for the second role in section 8b if you expand.
-
-Scalr requires a **multi-region KMS key**; the ARN must look like `arn:aws:kms:...:key/mrk-...`.
-
-**Why `put-key-policy` comes after the role:** KMS validates IAM principals. Applying a key policy that references a role ARN **before** that role exists returns `MalformedPolicyDocumentException` / invalid principals.
-
-**Hardcoded names (edit in the JSON files if you rename things):**
-
-| Item | Value |
-|------|--------|
-| Primary IAM role | `scalr-cmek-oidc-test-role` |
-| Primary audience (OIDC client id + trust `aud` + Scalr `aws-audience`) | `scalr-cmek-aws-oidc-test` |
-| Second IAM role (expansion only) | `scalr-cmek-oidc-test-role-b` |
-| Second audience (expansion only) | `scalr-cmek-aws-oidc-test-b` |
-
----
-
-## 1. Variables (minimal)
-
-Only these need exporting; everything else is hardcoded in the snippets below.
+## 1 · OIDC IdP
 
 ```bash
-export AWS_REGION="us-east-1"
-export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-export SCALR_HOSTNAME="your-env.scalr.io"   # no scheme; must match Scalr UI URL host
-export OIDC_ISSUER_URL="https://${SCALR_HOSTNAME}"
+# TLS leaf cert SHA-1 thumbprint for $CMEK_SCALR_HOSTNAME (paste into CMEK_OIDC_THUMBPRINT / create-open-id-connect-provider)
+echo | openssl s_client -servername "$CMEK_SCALR_HOSTNAME" -connect "${CMEK_SCALR_HOSTNAME}:443" 2>/dev/null \
+  | openssl x509 -fingerprint -noout -sha1 | sed 's/^.*=//;s/://g'
 ```
 
-Trust policy condition keys use the **host** as prefix: `${SCALR_HOSTNAME}:aud` and `${SCALR_HOSTNAME}:sub`. **`StringEquals`** with a **JSON array** for `sub` allows multiple Scalr accounts (logical OR).
-
-
-### IAM role ARNs (hardcoded role names from this guide)
-
-Primary (`aws-role-arn` for the first CMEK profile):
-
 ```bash
-aws iam get-role --role-name scalr-cmek-oidc-test-role --query Role.Arn --output text
+aws iam create-open-id-connect-provider \
+  --url "$CMEK_OIDC_ISSUER_URL" \
+  --client-id-list "${CMEK_OIDC_AUDIENCE_A}" \
+  --thumbprint-list "$CMEK_OIDC_THUMBPRINT"
 ```
 
-Second role, if you completed section 8 (`scalr-cmek-oidc-test-role-b`):
-
 ```bash
-aws iam get-role --role-name scalr-cmek-oidc-test-role-b --query Role.Arn --output text
+export CMEK_OIDC_PROVIDER_ARN="$(aws iam list-open-id-connect-providers --query \
+  "OpenIDConnectProviderList[?contains(Arn, '${CMEK_SCALR_HOSTNAME}')].Arn | [0]" --output text)"
+echo "$CMEK_OIDC_PROVIDER_ARN"
 ```
 
-Export for reuse:
-
 ```bash
-export ROLE_ARN_PRIMARY="$(aws iam get-role --role-name scalr-cmek-oidc-test-role --query Role.Arn --output text)"
-export ROLE_ARN_SECONDARY="$(aws iam get-role --role-name scalr-cmek-oidc-test-role-b --query Role.Arn --output text 2>/dev/null || true)"
-```
-
-### OIDC provider ARN
-
-If `contains(Arn, hostname)` fails (URL in the ARN is percent-encoded), list URLs and pick the one that matches `https://${SCALR_HOSTNAME}`:
-
-```bash
+# List every account OIDC IdP: issuer URL -> ARN (pick the ARN that matches $CMEK_OIDC_ISSUER_URL)
 for arn in $(aws iam list-open-id-connect-providers --query OpenIDConnectProviderList[].Arn --output text); do
   url="$(aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$arn" --query Url --output text)"
   echo "$url  ->  $arn"
 done
 ```
 
-Or when the hostname appears literally in the ARN:
-
-```bash
-export OIDC_PROVIDER_ARN="$(aws iam list-open-id-connect-providers --query \
-  "OpenIDConnectProviderList[?contains(Arn, '${SCALR_HOSTNAME}')].Arn | [0]" --output text)"
-echo "$OIDC_PROVIDER_ARN"
-```
-
-### KMS key id and key ARN
-
-If you still have the **key id** (starts with `mrk-` for multi-region keys):
-
-```bash
-export KMS_KEY_ID="mrk-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-export KMS_KEY_ARN="$(aws kms describe-key --region "$AWS_REGION" --key-id "$KMS_KEY_ID" --query KeyMetadata.Arn --output text)"
-echo "$KMS_KEY_ARN"
-```
-
-If you only have the **full key ARN**, the id is the last path segment:
-
-```bash
-export KMS_KEY_ARN="arn:aws:kms:us-east-1:123456789012:key/mrk-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-export KMS_KEY_ID="${KMS_KEY_ARN##*/}"
-```
-
-To **browse** keys in the region (find by `Description` such as `Scalr CMEK AWS OIDC test`):
-
-```bash
-for id in $(aws kms list-keys --region "$AWS_REGION" --query 'Keys[].KeyId' --output text); do
-  aws kms describe-key --region "$AWS_REGION" --key-id "$id" \
-    --query 'KeyMetadata.[KeyId,Arn,Description]' --output text
-done
-```
-
-### Quick map to Scalr fields
-
-| Scalr / doc field | CLI / value |
-|-------------------|-------------|
-| `aws-role-arn` (primary) | Output of `get-role` for `scalr-cmek-oidc-test-role` |
-| `aws-role-arn` (second profile) | Output of `get-role` for `scalr-cmek-oidc-test-role-b` |
-| `aws-kms-key-arn` | `describe-key` → `KeyMetadata.Arn` (must contain `mrk-`) |
-| Trust JSON `Principal.Federated` | `OIDC_PROVIDER_ARN` from the loop or `list-open-id-connect-providers` |
-
 ---
 
-## 3. IAM OIDC provider (single audience)
-
-Start with **one** client ID; add the second later when you expand.
+## 2 · MRK
 
 ```bash
-# Replace with the TLS thumbprint of $OIDC_ISSUER_URL (console can compute it when you create the provider)
-export OIDC_THUMBPRINT="<40-char-hex>"
-
-aws iam create-open-id-connect-provider \
-  --url "$OIDC_ISSUER_URL" \
-  --client-id-list scalr-cmek-aws-oidc-test \
-  --thumbprint-list "$OIDC_THUMBPRINT"
-```
-
-Thumbprint helper:
-
-```bash
-echo | openssl s_client -servername "$SCALR_HOSTNAME" -connect "${SCALR_HOSTNAME}:443" 2>/dev/null \
-  | openssl x509 -fingerprint -noout -sha1 | sed 's/^.*=//;s/://g'
-```
-
-```bash
-export OIDC_PROVIDER_ARN="$(aws iam list-open-id-connect-providers --query \
-  "OpenIDConnectProviderList[?contains(Arn, '${SCALR_HOSTNAME}')].Arn | [0]" --output text)"
-```
-
----
-
-## 4. Multi-region KMS key (create only)
-
-Create the key and capture the ARN. **Do not** set a custom key policy yet (default policy allows account root; you will replace it after the role exists).
-
-```bash
-export KMS_KEY_ID="$(
+export CMEK_OIDC_KMS_KEY_ID="$(
   aws kms create-key \
-    --region "$AWS_REGION" \
+    --region "${CMEK_KMS_REGION}" \
     --description "Scalr CMEK AWS OIDC test" \
     --key-usage ENCRYPT_DECRYPT \
     --origin AWS_KMS \
@@ -172,24 +84,27 @@ export KMS_KEY_ID="$(
     --output text
 )"
 
-export KMS_KEY_ARN="$(aws kms describe-key --region "$AWS_REGION" --key-id "$KMS_KEY_ID" --query KeyMetadata.Arn --output text)"
+export CMEK_OIDC_KMS_KEY_ARN="$(aws kms describe-key --region "${CMEK_KMS_REGION}" --key-id "${CMEK_OIDC_KMS_KEY_ID}" --query KeyMetadata.Arn --output text)"
+echo "$CMEK_OIDC_KMS_KEY_ARN"
+```
+
+```bash
+export CMEK_OIDC_KMS_KEY_ID="${CMEK_OIDC_KMS_KEY_ARN##*/}"
+```
+
+```bash
+# Browse CMKs in $CMEK_KMS_REGION (KeyId, ARN, Description) when you need to find an existing MRK by hand
+for id in $(aws kms list-keys --region "${CMEK_KMS_REGION}" --query 'Keys[].KeyId' --output text); do
+  aws kms describe-key --region "${CMEK_KMS_REGION}" --key-id "$id" \
+    --query 'KeyMetadata.[KeyId,Arn,Description]' --output text
+done
 ```
 
 ---
 
-## 5. IAM role — primary (`scalr-cmek-oidc-test-role`)
+## 3 · Primary role
 
-Trust policy `aud` is `scalr-cmek-aws-oidc-test` (must match Scalr `aws-audience` and the OIDC provider client id).
-
-Pick **one** of the trust snippets below. The JWT `sub` claim is always `account:<scalr-account-name>` (see the table at the top).
-
-**Option A — single Scalr account**
-
-Set the account **name** (same string Scalr uses in `sub`, without the `account:` prefix), or skip the export and edit the JSON to a literal such as `"account:prod"`.
-
-```bash
-export SCALR_ACCOUNT_NAME="your-scalr-account-name"
-```
+Trust: `${CMEK_SCALR_HOSTNAME}:aud` / `${CMEK_SCALR_HOSTNAME}:sub`. Pick **one** of the two `cat` blocks.
 
 ```bash
 cat > /tmp/trust-policy-oidc.json << EOF
@@ -197,12 +112,12 @@ cat > /tmp/trust-policy-oidc.json << EOF
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": { "Federated": "${OIDC_PROVIDER_ARN}" },
+    "Principal": { "Federated": "${CMEK_OIDC_PROVIDER_ARN}" },
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {
-        "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test",
-        "${SCALR_HOSTNAME}:sub": "account:${SCALR_ACCOUNT_NAME}"
+        "${CMEK_SCALR_HOSTNAME}:aud": "${CMEK_OIDC_AUDIENCE_A}",
+        "${CMEK_SCALR_HOSTNAME}:sub": "account:${CMEK_SCALR_ACCOUNT_NAME}"
       }
     }
   }]
@@ -210,23 +125,19 @@ cat > /tmp/trust-policy-oidc.json << EOF
 EOF
 ```
 
-**Option B — multiple Scalr accounts**
-
-A JSON array under `StringEquals` for `sub` (logical OR across accounts).
-
 ```bash
 cat > /tmp/trust-policy-oidc.json << EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": { "Federated": "${OIDC_PROVIDER_ARN}" },
+    "Principal": { "Federated": "${CMEK_OIDC_PROVIDER_ARN}" },
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {
-        "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test",
-        "${SCALR_HOSTNAME}:sub": [
-          "account:${SCALR_ACCOUNT_NAME}",
+        "${CMEK_SCALR_HOSTNAME}:aud": "${CMEK_OIDC_AUDIENCE_A}",
+        "${CMEK_SCALR_HOSTNAME}:sub": [
+          "account:${CMEK_SCALR_ACCOUNT_NAME}",
           "account:demo",
           "account:sandbox"
         ]
@@ -237,15 +148,18 @@ cat > /tmp/trust-policy-oidc.json << EOF
 EOF
 ```
 
-Then create the role (same for both options):
-
 ```bash
 aws iam create-role \
-  --role-name scalr-cmek-oidc-test-role \
+  --role-name "${CMEK_OIDC_ROLE_NAME}" \
   --assume-role-policy-document file:///tmp/trust-policy-oidc.json
 ```
 
-Inline policy: allow KMS on this key only.
+```bash
+# Existing role: after you change /tmp/trust-policy-oidc.json, re-apply trust
+aws iam update-assume-role-policy \
+  --role-name "${CMEK_OIDC_ROLE_NAME}" \
+  --policy-document file:///tmp/trust-policy-oidc.json
+```
 
 ```bash
 cat > /tmp/kms-role-policy.json << EOF
@@ -254,30 +168,25 @@ cat > /tmp/kms-role-policy.json << EOF
   "Statement": [{
     "Effect": "Allow",
     "Action": [ "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey" ],
-    "Resource": "${KMS_KEY_ARN}"
+    "Resource": "${CMEK_OIDC_KMS_KEY_ARN}"
   }]
 }
 EOF
 
 aws iam put-role-policy \
-  --role-name scalr-cmek-oidc-test-role \
+  --role-name "${CMEK_OIDC_ROLE_NAME}" \
   --policy-name cmek-kms-minimal \
   --policy-document file:///tmp/kms-role-policy.json
 ```
 
-Update trust later:
-
 ```bash
-aws iam update-assume-role-policy \
-  --role-name scalr-cmek-oidc-test-role \
-  --policy-document file:///tmp/trust-policy-oidc.json
+aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME}" --query Role.Arn --output text
+export CMEK_OIDC_ROLE_ARN_PRIMARY="$(aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME}" --query Role.Arn --output text)"
 ```
 
 ---
 
-## 6. KMS key policy (after the primary role exists)
-
-Now the role ARN is valid. Lock the key: account root for admin, primary role for crypto only.
+## 4 · Key policy
 
 ```bash
 cat > /tmp/kms-key-policy.json << EOF
@@ -287,14 +196,14 @@ cat > /tmp/kms-key-policy.json << EOF
     {
       "Sid": "AllowAccountAdmins",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:root" },
+      "Principal": { "AWS": "arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:root" },
       "Action": "kms:*",
       "Resource": "*"
     },
     {
       "Sid": "AllowCmekRolePrimary",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/scalr-cmek-oidc-test-role" },
+      "Principal": { "AWS": "arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:role/${CMEK_OIDC_ROLE_NAME}" },
       "Action": [ "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey" ],
       "Resource": "*"
     }
@@ -303,42 +212,39 @@ cat > /tmp/kms-key-policy.json << EOF
 EOF
 
 aws kms put-key-policy \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID" \
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}" \
   --policy-name default \
   --policy file:///tmp/kms-key-policy.json
 ```
 
 ---
 
-## 7. Configure Scalr — single profile
+## 5 · Scalr
 
 | Field | Value |
 |--------|--------|
 | `aws-credentials-type` | `oidc` |
-| `aws-kms-key-arn` | `$KMS_KEY_ARN` (must contain `mrk-`) |
-| `aws-role-arn` | `arn:aws:iam::<AWS_ACCOUNT_ID>:role/scalr-cmek-oidc-test-role` |
-| `aws-audience` | `scalr-cmek-aws-oidc-test` |
+| `aws-kms-key-arn` | `$CMEK_OIDC_KMS_KEY_ARN` |
+| `aws-role-arn` | `arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:role/${CMEK_OIDC_ROLE_NAME}` |
+| `aws-audience` | `$CMEK_OIDC_AUDIENCE_A` |
 
-Then run your CMEK validation path (enable BYOK / rotate DEK as required for your environment).
+| Scalr field | CLI / var |
+|-------------|-----------|
+| `aws-role-arn` (primary) | `get-role` → `${CMEK_OIDC_ROLE_NAME}` or `$CMEK_OIDC_ROLE_ARN_PRIMARY` |
+| `aws-role-arn` (second) | `get-role` → `${CMEK_OIDC_ROLE_NAME_SECONDARY}` |
+| `aws-kms-key-arn` | `describe-key` → MRK ARN |
+| Trust `Principal.Federated` | `$CMEK_OIDC_PROVIDER_ARN` |
 
 ---
 
-## 8. Expand to a second role and audience (optional)
-
-Use this when you need another CMEK profile with a different `aws-audience` / IAM role pair on the **same** KMS key and issuer.
-
-### 8a. Register the second audience on the OIDC provider
+## 6 · Second role
 
 ```bash
 aws iam add-client-id-to-open-id-connect-provider \
-  --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN" \
-  --client-id scalr-cmek-aws-oidc-test-b
+  --open-id-connect-provider-arn "$CMEK_OIDC_PROVIDER_ARN" \
+  --client-id "${CMEK_OIDC_AUDIENCE_B}"
 ```
-
-### 8b. Create the second role and inline policy
-
-Use the **same** `sub` shape you chose in section 5 (single string or array). Example below matches Option B from section 5; if you used Option A there, set `"${SCALR_HOSTNAME}:sub"` to `"account:${SCALR_ACCOUNT_NAME}"` instead of the array.
 
 ```bash
 cat > /tmp/trust-policy-oidc-b.json << EOF
@@ -346,13 +252,13 @@ cat > /tmp/trust-policy-oidc-b.json << EOF
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": { "Federated": "${OIDC_PROVIDER_ARN}" },
+    "Principal": { "Federated": "${CMEK_OIDC_PROVIDER_ARN}" },
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {
-        "${SCALR_HOSTNAME}:aud": "scalr-cmek-aws-oidc-test-b",
-        "${SCALR_HOSTNAME}:sub": [
-          "account:${SCALR_ACCOUNT_NAME}",
+        "${CMEK_SCALR_HOSTNAME}:aud": "${CMEK_OIDC_AUDIENCE_B}",
+        "${CMEK_SCALR_HOSTNAME}:sub": [
+          "account:${CMEK_SCALR_ACCOUNT_NAME}",
           "account:demo",
           "account:sandbox"
         ]
@@ -363,22 +269,25 @@ cat > /tmp/trust-policy-oidc-b.json << EOF
 EOF
 
 aws iam create-role \
-  --role-name scalr-cmek-oidc-test-role-b \
+  --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" \
   --assume-role-policy-document file:///tmp/trust-policy-oidc-b.json
 ```
 
 ```bash
+# Existing role: after you change /tmp/trust-policy-oidc-b.json, re-apply trust
+aws iam update-assume-role-policy \
+  --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" \
+  --policy-document file:///tmp/trust-policy-oidc-b.json
+```
+
+(If section 3 used single-`sub` trust, set `"${CMEK_SCALR_HOSTNAME}:sub"` to `"account:${CMEK_SCALR_ACCOUNT_NAME}"` in this JSON instead of the array.)
+
+```bash
 aws iam put-role-policy \
-  --role-name scalr-cmek-oidc-test-role-b \
+  --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" \
   --policy-name cmek-kms-minimal \
   --policy-document file:///tmp/kms-role-policy.json
 ```
-
-(Same `kms-role-policy.json` as section 5 — still one key ARN.)
-
-### 8c. Update the KMS key policy to allow both roles
-
-Replace the default policy on **the same** `KMS_KEY_ID` so both role principals can use the key.
 
 ```bash
 cat > /tmp/kms-key-policy.json << EOF
@@ -388,21 +297,21 @@ cat > /tmp/kms-key-policy.json << EOF
     {
       "Sid": "AllowAccountAdmins",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:root" },
+      "Principal": { "AWS": "arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:root" },
       "Action": "kms:*",
       "Resource": "*"
     },
     {
       "Sid": "AllowCmekRolePrimary",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/scalr-cmek-oidc-test-role" },
+      "Principal": { "AWS": "arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:role/${CMEK_OIDC_ROLE_NAME}" },
       "Action": [ "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey" ],
       "Resource": "*"
     },
     {
       "Sid": "AllowCmekRoleSecondary",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/scalr-cmek-oidc-test-role-b" },
+      "Principal": { "AWS": "arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:role/${CMEK_OIDC_ROLE_NAME_SECONDARY}" },
       "Action": [ "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey" ],
       "Resource": "*"
     }
@@ -411,34 +320,56 @@ cat > /tmp/kms-key-policy.json << EOF
 EOF
 
 aws kms put-key-policy \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID" \
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}" \
   --policy-name default \
   --policy file:///tmp/kms-key-policy.json
 ```
 
-### 8d. Configure Scalr — second profile
-
 | Field | Value |
 |--------|--------|
-| `aws-role-arn` | `arn:aws:iam::<AWS_ACCOUNT_ID>:role/scalr-cmek-oidc-test-role-b` |
-| `aws-audience` | `scalr-cmek-aws-oidc-test-b` |
+| `aws-role-arn` | `arn:aws:iam::${CMEK_AWS_ACCOUNT_ID}:role/${CMEK_OIDC_ROLE_NAME_SECONDARY}` |
+| `aws-audience` | `$CMEK_OIDC_AUDIENCE_B` |
 
-Same `aws-kms-key-arn` as the first profile unless you use another key.
+Same `aws-kms-key-arn` as section 5 unless you point at another key.
+
+```bash
+aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME}" --query Role.Arn --output text
+aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" --query Role.Arn --output text
+export CMEK_OIDC_ROLE_ARN_PRIMARY="$(aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME}" --query Role.Arn --output text)"
+export CMEK_OIDC_ROLE_ARN_SECONDARY="$(aws iam get-role --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" --query Role.Arn --output text 2>/dev/null || true)"
+```
 
 ---
 
-## 9. Additional KMS key (optional)
+## 7 · Second MRK
 
-Create another MRK **after** every IAM role that should use it already exists.
+Create another MRK only after every IAM role that will use it exists. `put-key-policy` on the new key: same shape as section **4** (one role) or **6** (both roles).
 
-1. Create the key and set `KMS_KEY_ID_2` / `KMS_KEY_ARN_2` (same `create-key` block as section 4).
+```bash
+export CMEK_OIDC_MRK_KEY_2_ID="$(
+  aws kms create-key \
+    --region "${CMEK_KMS_REGION}" \
+    --description "Scalr CMEK AWS OIDC test (second MRK)" \
+    --key-usage ENCRYPT_DECRYPT \
+    --origin AWS_KMS \
+    --multi-region \
+    --query KeyMetadata.KeyId \
+    --output text
+)"
+export CMEK_OIDC_MRK_KEY_2_ARN="$(aws kms describe-key --region "${CMEK_KMS_REGION}" --key-id "${CMEK_OIDC_MRK_KEY_2_ID}" --query KeyMetadata.Arn --output text)"
+```
 
-2. **`put-key-policy`** on `KMS_KEY_ID_2`:
-   - **Single-role setup:** same shape as **section 6** (root + `scalr-cmek-oidc-test-role` only).
-   - **After section 8:** same shape as **section 8c** (root + both roles).
+```bash
+export CMEK_OIDC_MRK_KEY_2_ID="mrk-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+export CMEK_OIDC_MRK_KEY_2_ARN="$(aws kms describe-key --region "${CMEK_KMS_REGION}" --key-id "${CMEK_OIDC_MRK_KEY_2_ID}" --query KeyMetadata.Arn --output text)"
+echo "$CMEK_OIDC_MRK_KEY_2_ARN"
+```
 
-3. **Update** each role’s inline policy so `Resource` lists every key ARN this role should use, for example:
+```bash
+export CMEK_OIDC_MRK_KEY_2_ARN="arn:aws:kms:us-east-1:123456789012:key/mrk-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+export CMEK_OIDC_MRK_KEY_2_ID="${CMEK_OIDC_MRK_KEY_2_ARN##*/}"
+```
 
 ```bash
 cat > /tmp/kms-role-policy.json << EOF
@@ -447,91 +378,93 @@ cat > /tmp/kms-role-policy.json << EOF
   "Statement": [{
     "Effect": "Allow",
     "Action": [ "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey" ],
-    "Resource": [ "${KMS_KEY_ARN}", "${KMS_KEY_ARN_2}" ]
+    "Resource": [ "${CMEK_OIDC_KMS_KEY_ARN}", "${CMEK_OIDC_MRK_KEY_2_ARN}" ]
   }]
 }
 EOF
 
 aws iam put-role-policy \
-  --role-name scalr-cmek-oidc-test-role \
+  --role-name "${CMEK_OIDC_ROLE_NAME}" \
   --policy-name cmek-kms-minimal \
   --policy-document file:///tmp/kms-role-policy.json
 ```
 
-If you completed section 8, run the same `put-role-policy` for `scalr-cmek-oidc-test-role-b`.
+```bash
+aws iam put-role-policy \
+  --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" \
+  --policy-name cmek-kms-minimal \
+  --policy-document file:///tmp/kms-role-policy.json
+```
+
+(Only run the second `put-role-policy` if section 6 was done.)
 
 ---
 
-## 10. KMS key material rotation (on-demand and status)
+## 8 · Rotation
 
-Use the key’s **primary** (home) region (`$AWS_REGION`). **Automatic key rotation** (e.g. yearly) runs on AWS’s schedule; to add a **new backing material version immediately**, use **on-demand rotation**. Scalr’s configured key ARN stays `.../key/mrk-...`; existing ciphertext remains decryptable.
-
-**Permissions:** caller needs `kms:RotateKeyOnDemand`, `kms:ListKeyRotations`, and `kms:GetKeyRotationStatus` as appropriate. **Multi-Region keys:** call on-demand rotation only on the **primary** key.
-
-### Trigger on-demand rotation now
+Primary MRK home region = `$CMEK_KMS_REGION`. On-demand rotation on the **primary** only.
 
 ```bash
 aws kms rotate-key-on-demand \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID"
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}"
 ```
-
-### List rotation events (verify `ON_DEMAND` / `AUTOMATIC`)
 
 ```bash
 aws kms list-key-rotations \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID"
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}"
 ```
-
-A row with **`RotationType`: `ON_DEMAND`** and **`KeyMaterialState`: `CURRENT`** means that version is active. If **`Truncated`** is true, paginate with `--starting-token` / `--max-items` per the CLI help.
-
-### Automatic rotation toggle (yearly schedule, not “rotate now”)
 
 ```bash
 aws kms get-key-rotation-status \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID"
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}"
 ```
-
-To enable the periodic schedule (separate from on-demand):
 
 ```bash
 aws kms enable-key-rotation \
-  --region "$AWS_REGION" \
-  --key-id "$KMS_KEY_ID"
+  --region "${CMEK_KMS_REGION}" \
+  --key-id "${CMEK_OIDC_KMS_KEY_ID}"
 ```
 
-**Limits:** on-demand rotation is capped per key (see [AWS KMS quotas](https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second-quota.html)); symmetric encryption CMKs only (not asymmetric / HMAC / unsupported custom stores). Details: [On-demand key rotation](https://docs.aws.amazon.com/kms/latest/developerguide/rotating-keys-on-demand.html).
+Quotas: [KMS quotas](https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second-quota.html) · On-demand: [rotating-keys-on-demand](https://docs.aws.amazon.com/kms/latest/developerguide/rotating-keys-on-demand.html).
 
 ---
 
-## 11. Quick negative checks (optional)
+## 9 · Negatives
 
-- Wrong `aws-audience` in Scalr: STS should deny (`AssumeRoleWithWebIdentity` fails).
-- Wrong Scalr account name in trust `sub`: deny.
-- Role policy `Resource` pointing at another key ARN: deny.
+- Wrong `aws-audience` → `AssumeRoleWithWebIdentity` fails.
+- Wrong `sub` / account name → deny.
+- Role policy `Resource` wrong key ARN → deny.
 
 ---
 
-## Cleanup
+## Cleanup · Tear down
 
-Re-export `AWS_REGION`, `AWS_ACCOUNT_ID`, `OIDC_PROVIDER_ARN`, `KMS_KEY_ID` (and `KMS_KEY_ID_2` if used) in a new shell.
-
-**After single-role setup only:**
+Re-export `CMEK_KMS_REGION`, `CMEK_AWS_ACCOUNT_ID`, `CMEK_OIDC_PROVIDER_ARN`, `CMEK_OIDC_KMS_KEY_ID`, and `CMEK_OIDC_MRK_KEY_2_ID` if used.
 
 ```bash
-aws iam delete-role-policy --role-name scalr-cmek-oidc-test-role --policy-name cmek-kms-minimal
-aws iam delete-role --role-name scalr-cmek-oidc-test-role
-aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN"
-aws kms schedule-key-deletion --region "$AWS_REGION" --key-id "$KMS_KEY_ID" --pending-window-in-days 7
+aws iam delete-role-policy --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}" --policy-name cmek-kms-minimal
+aws iam delete-role --role-name "${CMEK_OIDC_ROLE_NAME_SECONDARY}"
 ```
 
-**If you added the second role (section 8), also:**
+(Run the block above only if section 6 was done.)
 
 ```bash
-aws iam delete-role-policy --role-name scalr-cmek-oidc-test-role-b --policy-name cmek-kms-minimal
-aws iam delete-role --role-name scalr-cmek-oidc-test-role-b
+aws iam delete-role-policy --role-name "${CMEK_OIDC_ROLE_NAME}" --policy-name cmek-kms-minimal
+aws iam delete-role --role-name "${CMEK_OIDC_ROLE_NAME}"
+aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$CMEK_OIDC_PROVIDER_ARN"
+```
+
+```bash
+aws kms schedule-key-deletion --region "${CMEK_KMS_REGION}" --key-id "${CMEK_OIDC_MRK_KEY_2_ID}" --pending-window-in-days 7
+```
+
+(Only if section 7 was used.)
+
+```bash
+aws kms schedule-key-deletion --region "${CMEK_KMS_REGION}" --key-id "${CMEK_OIDC_KMS_KEY_ID}" --pending-window-in-days 7
 ```
 
 ```bash
@@ -540,7 +473,7 @@ rm -f /tmp/kms-key-policy.json /tmp/trust-policy-oidc.json /tmp/trust-policy-oid
 
 ---
 
-## Reference
+## Reference · Links
 
-- Internal OpenAPI: `aws-audience` is the OIDC token audience for `AssumeRoleWithWebIdentity` ([`taco/openapi/openapi-internal.yml`](taco/openapi/openapi-internal.yml)).
-- Token claims: [`taco/app/encryption/service/oidc.py`](taco/app/encryption/service/oidc.py) (`issue_server_token`).
+- `aws-audience`: OpenAPI internal spec `taco/openapi/openapi-internal.yml`
+- Claims: `taco/app/encryption/service/oidc.py` (`issue_server_token`)
