@@ -37,6 +37,20 @@ export CMEK_SCALR_ACCOUNT_NAME="your-scalr-account-name"
 export CMEK_OIDC_THUMBPRINT="<40-char-hex>"
 ```
 
+## Table of contents
+
+- [1 · OIDC IdP](#1--oidc-idp)
+- [2 · MRK](#2--mrk)
+- [3 · Primary role](#3--primary-role)
+- [4 · Key policy](#4--key-policy)
+- [5 · Scalr](#5--scalr)
+- [6 · Second role](#6--second-role)
+- [7 · Second MRK](#7--second-mrk)
+- [8 · Rotation](#8--rotation)
+- [9 · Negatives](#9--negatives)
+- [Cleanup · Tear down](#cleanup--tear-down)
+- [Reference · Links](#reference--links)
+
 ---
 
 ## 1 · OIDC IdP
